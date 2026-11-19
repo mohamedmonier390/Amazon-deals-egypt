@@ -115,15 +115,34 @@ private object DealStore {
 }
 
 class MainActivity : ComponentActivity() {
+    private var sharedText by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) { DealsApp() } }
+        receiveSharedProduct(intent)
+        setContent {
+            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                DealsApp(sharedText = sharedText, onSharedTextConsumed = { sharedText = null })
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        receiveSharedProduct(intent)
+    }
+
+    private fun receiveSharedProduct(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND || intent.type != "text/plain") return
+        sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+            ?: intent.getStringExtra(Intent.EXTRA_SUBJECT)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DealsApp() {
+fun DealsApp(sharedText: String? = null, onSharedTextConsumed: () -> Unit = {}) {
     val context = LocalContext.current
     var name by remember { mutableStateOf("") }
     var price by remember { mutableStateOf("") }
@@ -142,6 +161,32 @@ fun DealsApp() {
     var search by remember { mutableStateOf("") }
     var minDiscount by remember { mutableStateOf("0") }
     var onlyUnpublished by remember { mutableStateOf(false) }
+
+    // Receive a product shared from the Amazon app or browser share menu.
+    LaunchedEffect(sharedText) {
+        val incoming = sharedText?.trim().orEmpty()
+        if (incoming.isNotBlank()) {
+            val candidate = Regex("https?://[^\\s]+", RegexOption.IGNORE_CASE)
+                .find(incoming)?.value?.trimEnd('.', ',', ')', ']', '}', '،', '؛')
+            val host = candidate?.let { runCatching { Uri.parse(it).host?.lowercase(Locale.ROOT) }.getOrNull() }
+            val isAmazonLink = host != null && (
+                host == "amzn.to" || host == "amazon.eg" || host.endsWith(".amazon.eg") ||
+                host.endsWith(".amazon.com") || host.endsWith(".amazon.co.uk") ||
+                host.endsWith(".amazon.sa") || host.endsWith(".amazon.ae")
+            )
+            if (candidate != null && isAmazonLink) {
+                url = candidate
+                val possibleTitle = incoming.substringBefore(candidate).trim().trim('"', '\'')
+                if (possibleTitle.length in 3..120 && !possibleTitle.contains("http", ignoreCase = true)) {
+                    name = possibleTitle
+                }
+                Toast.makeText(context, "تم استيراد رابط المنتج. أدخل السعر الحالي ثم احفظ العرض.", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(context, "لم نعثر على رابط Amazon صالح في المحتوى المُشارك.", Toast.LENGTH_LONG).show()
+            }
+            onSharedTextConsumed()
+        }
+    }
 
     fun updateDeals(next: List<Deal>) { deals = next; DealStore.save(context, next) }
     val threshold = minDiscount.toIntOrNull()?.coerceIn(0, 100) ?: 0
