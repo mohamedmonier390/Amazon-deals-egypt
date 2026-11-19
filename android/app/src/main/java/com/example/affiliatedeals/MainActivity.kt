@@ -28,13 +28,18 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
+data class PricePoint(val price: String, val recordedAt: Long = System.currentTimeMillis())
+
 data class Deal(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
     val price: String,
     val oldPrice: String,
     val url: String,
+    val category: String = "عام",
+    val priceHistory: List<PricePoint> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = createdAt,
     val published: Boolean = false
 ) {
     private fun number(value: String): Double? = value.trim()
@@ -75,7 +80,16 @@ private object DealStore {
                     id = o.optString("id", UUID.randomUUID().toString()),
                     name = o.optString("name"), price = o.optString("price"),
                     oldPrice = o.optString("oldPrice"), url = o.optString("url"),
+                    category = o.optString("category", "عام"),
+                    priceHistory = run {
+                        val h = o.optJSONArray("priceHistory") ?: JSONArray()
+                        (0 until h.length()).map { j ->
+                            val point = h.getJSONObject(j)
+                            PricePoint(point.optString("price"), point.optLong("recordedAt", System.currentTimeMillis()))
+                        }
+                    },
                     createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+                    updatedAt = o.optLong("updatedAt", o.optLong("createdAt", System.currentTimeMillis())),
                     published = o.optBoolean("published", false)
                 )
             }
@@ -87,8 +101,13 @@ private object DealStore {
         deals.forEach { d ->
             array.put(JSONObject().apply {
                 put("id", d.id); put("name", d.name); put("price", d.price)
-                put("oldPrice", d.oldPrice); put("url", d.url)
-                put("createdAt", d.createdAt); put("published", d.published)
+                put("oldPrice", d.oldPrice); put("url", d.url); put("category", d.category)
+                put("createdAt", d.createdAt); put("updatedAt", d.updatedAt); put("published", d.published)
+                put("priceHistory", JSONArray().apply {
+                    d.priceHistory.forEach { point -> put(JSONObject().apply {
+                        put("price", point.price); put("recordedAt", point.recordedAt)
+                    }) }
+                })
             })
         }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, array.toString()).apply()
@@ -110,6 +129,13 @@ fun DealsApp() {
     var price by remember { mutableStateOf("") }
     var oldPrice by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
+    val categories = listOf("عام", "إلكترونيات", "موبايلات", "أجهزة منزلية", "ملابس وأحذية", "العناية الشخصية", "مستلزمات المنزل", "ألعاب", "رياضة", "كتب")
+    var selectedCategory by remember { mutableStateOf("عام") }
+    var categoryFilter by remember { mutableStateOf("الكل") }
+    var sortMode by remember { mutableStateOf("أعلى خصم") }
+    var editDeal by remember { mutableStateOf<Deal?>(null) }
+    var editPrice by remember { mutableStateOf("") }
+    var editOldPrice by remember { mutableStateOf("") }
     var deals by remember { mutableStateOf(DealStore.load(context)) }
     var preview by remember { mutableStateOf<Deal?>(null) }
     var error by remember { mutableStateOf("") }
@@ -121,8 +147,50 @@ fun DealsApp() {
     val threshold = minDiscount.toIntOrNull()?.coerceIn(0, 100) ?: 0
     val filtered = deals.filter { d ->
         (search.isBlank() || d.name.contains(search, true)) &&
-            (!onlyUnpublished || !d.published) && (d.discount() ?: 0) >= threshold
-    }.sortedByDescending { it.discount() ?: 0 }
+            (!onlyUnpublished || !d.published) && (d.discount() ?: 0) >= threshold &&
+            (categoryFilter == "الكل" || d.category == categoryFilter)
+    }.let { list -> when (sortMode) {
+        "الأحدث" -> list.sortedByDescending { it.updatedAt }
+        "الأقل خصمًا" -> list.sortedBy { it.discount() ?: 0 }
+        else -> list.sortedByDescending { it.discount() ?: 0 }
+    } }
+
+    editDeal?.let { target ->
+        AlertDialog(
+            onDismissRequest = { editDeal = null },
+            title = { Text("تحديث بيانات السعر") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(target.name)
+                    OutlinedTextField(editPrice, { editPrice = it }, label = { Text("السعر الحالي بالجنيه") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
+                    OutlinedTextField(editOldPrice, { editOldPrice = it }, label = { Text("السعر السابق بالجنيه") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true)
+                    Text("سيتم تسجيل السعر الجديد في سجل الأسعار.", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val p = editPrice.trim().replace(',', '.')
+                    val old = editOldPrice.trim().replace(',', '.')
+                    val validP = p.toDoubleOrNull()?.let { it > 0 } == true
+                    val validOld = old.isBlank() || old.toDoubleOrNull()?.let { it > 0 } == true
+                    if (!validP || !validOld) {
+                        Toast.makeText(context, "راجع الأسعار المدخلة", Toast.LENGTH_SHORT).show()
+                    } else {
+                        val updated = deals.map { d ->
+                            if (d.id == target.id) d.copy(
+                                price = p, oldPrice = old, updatedAt = System.currentTimeMillis(),
+                                priceHistory = if (d.priceHistory.lastOrNull()?.price == p) d.priceHistory else d.priceHistory + PricePoint(p)
+                            ) else d
+                        }
+                        updateDeals(updated)
+                        editDeal = null
+                        Toast.makeText(context, "تم تحديث السعر وحفظ سجل التغيير", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("حفظ التحديث") }
+            },
+            dismissButton = { TextButton(onClick = { editDeal = null }) { Text("إلغاء") } }
+        )
+    }
 
     MaterialTheme {
         Scaffold(topBar = { TopAppBar(title = { Text("Monier Deals | عروض مصر") }) }) { padding ->
@@ -138,6 +206,13 @@ fun DealsApp() {
                             OutlinedTextField(name, { name = it }, label = { Text("اسم المنتج") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                             OutlinedTextField(price, { price = it }, label = { Text("السعر الحالي بالجنيه") }, modifier = Modifier.fillMaxWidth(), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                             OutlinedTextField(oldPrice, { oldPrice = it }, label = { Text("السعر قبل الخصم (اختياري)") }, modifier = Modifier.fillMaxWidth(), singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                            var categoryExpanded by remember { mutableStateOf(false) }
+                            Box {
+                                OutlinedButton(onClick = { categoryExpanded = true }, modifier = Modifier.fillMaxWidth()) { Text("التصنيف: $selectedCategory") }
+                                DropdownMenu(expanded = categoryExpanded, onDismissRequest = { categoryExpanded = false }) {
+                                    categories.forEach { category -> DropdownMenuItem(text = { Text(category) }, onClick = { selectedCategory = category; categoryExpanded = false }) }
+                                }
+                            }
                             OutlinedTextField(url, { url = it }, label = { Text("رابط المنتج أو رابط العمولة") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                             if (error.isNotBlank()) Text(error, color = MaterialTheme.colorScheme.error)
                             Button(modifier = Modifier.fillMaxWidth(), onClick = {
@@ -155,9 +230,9 @@ fun DealsApp() {
                                     else -> ""
                                 }
                                 if (error.isBlank()) {
-                                    val deal = Deal(name = name.trim(), price = current, oldPrice = old, url = normalizedUrl)
+                                    val deal = Deal(name = name.trim(), price = current, oldPrice = old, url = normalizedUrl, category = selectedCategory, priceHistory = listOf(PricePoint(current)))
                                     updateDeals(listOf(deal) + deals); preview = deal
-                                    name = ""; price = ""; oldPrice = ""; url = ""
+                                    name = ""; price = ""; oldPrice = ""; url = ""; selectedCategory = "عام"
                                     Toast.makeText(context, "تم حفظ العرض على الجهاز", Toast.LENGTH_SHORT).show()
                                 }
                             }) { Text("حفظ العرض وتجهيز المنشور") }
@@ -195,6 +270,22 @@ fun DealsApp() {
                         Checkbox(checked = onlyUnpublished, onCheckedChange = { onlyUnpublished = it })
                         Text("إظهار العروض غير المنشورة فقط")
                     }
+                    var filterExpanded by remember { mutableStateOf(false) }
+                    var sortExpanded by remember { mutableStateOf(false) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        Box(Modifier.weight(1f)) {
+                            OutlinedButton(onClick = { filterExpanded = true }, modifier = Modifier.fillMaxWidth()) { Text("التصنيف: $categoryFilter") }
+                            DropdownMenu(expanded = filterExpanded, onDismissRequest = { filterExpanded = false }) {
+                                (listOf("الكل") + categories).forEach { c -> DropdownMenuItem(text = { Text(c) }, onClick = { categoryFilter = c; filterExpanded = false }) }
+                            }
+                        }
+                        Box(Modifier.weight(1f)) {
+                            OutlinedButton(onClick = { sortExpanded = true }, modifier = Modifier.fillMaxWidth()) { Text("الترتيب: $sortMode") }
+                            DropdownMenu(expanded = sortExpanded, onDismissRequest = { sortExpanded = false }) {
+                                listOf("أعلى خصم", "الأحدث", "الأقل خصمًا").forEach { mode -> DropdownMenuItem(text = { Text(mode) }, onClick = { sortMode = mode; sortExpanded = false }) }
+                            }
+                        }
+                    }
                     Text("المعروض: ${filtered.size} • إجمالي المحفوظ: ${deals.size}", style = MaterialTheme.typography.bodySmall)
                     Text("تنبيه: السعر والخصم يعتمدان على البيانات التي أدخلتها؛ لا يتم تحديثهما تلقائيًا من أمازون في هذه النسخة.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
                 }
@@ -203,11 +294,17 @@ fun DealsApp() {
                     Card {
                         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                             Text(deal.name, style = MaterialTheme.typography.titleMedium)
+                            Text("التصنيف: ${deal.category}", style = MaterialTheme.typography.bodySmall)
                             Text("السعر: ${deal.price} جنيه" + (deal.discount()?.let { " • خصم $it%" } ?: " • لا يوجد خصم محسوب"))
                             Text(if (deal.published) "الحالة: تم وضع علامة منشور" else "الحالة: لم يُنشر بعد", style = MaterialTheme.typography.bodySmall)
                             Text("أضيف: ${SimpleDateFormat("yyyy/MM/dd HH:mm", Locale("ar", "EG")).format(Date(deal.createdAt))}", style = MaterialTheme.typography.bodySmall)
+                            Text("آخر تحديث: ${SimpleDateFormat("yyyy/MM/dd HH:mm", Locale("ar", "EG")).format(Date(deal.updatedAt))}", style = MaterialTheme.typography.bodySmall)
+                            if (deal.priceHistory.isNotEmpty()) {
+                                Text("سجل الأسعار: " + deal.priceHistory.takeLast(4).joinToString(" ← ") { "${it.price} ج" }, style = MaterialTheme.typography.bodySmall)
+                            }
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 TextButton(onClick = { preview = deal }) { Text("معاينة") }
+                                TextButton(onClick = { editDeal = deal; editPrice = deal.price; editOldPrice = deal.oldPrice }) { Text("تحديث السعر") }
                                 TextButton(onClick = {
                                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(deal.url))
                                     context.startActivity(intent)
