@@ -134,9 +134,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun receiveSharedProduct(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND || intent.type != "text/plain") return
-        sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)
+        if (intent?.action != Intent.ACTION_SEND) return
+        val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
             ?: intent.getStringExtra(Intent.EXTRA_SUBJECT)
+        val clipText = intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.let { item ->
+            item.text?.toString() ?: item.uri?.toString()
+        }
+        sharedText = text ?: clipText
     }
 }
 
@@ -162,27 +166,33 @@ fun DealsApp(sharedText: String? = null, onSharedTextConsumed: () -> Unit = {}) 
     var minDiscount by remember { mutableStateOf("0") }
     var onlyUnpublished by remember { mutableStateOf(false) }
 
-    // Receive a product shared from the Amazon app or browser share menu.
+    // Robustly receive Amazon links shared as text, subject, or URI.
     LaunchedEffect(sharedText) {
         val incoming = sharedText?.trim().orEmpty()
         if (incoming.isNotBlank()) {
-            val candidate = Regex("https?://[^\\s]+", RegexOption.IGNORE_CASE)
-                .find(incoming)?.value?.trimEnd('.', ',', ')', ']', '}', '،', '؛')
-            val host = candidate?.let { runCatching { Uri.parse(it).host?.lowercase(Locale.ROOT) }.getOrNull() }
+            val rawUrl = Regex("https?://[^\\s<>\"']+", RegexOption.IGNORE_CASE)
+                .find(incoming)?.value
+            val candidate = rawUrl?.trimEnd('.', ',', ')', ']', '}', '،', '؛', '\'')
+            val host = candidate?.let {
+                runCatching { Uri.parse(it).host?.lowercase(Locale.ROOT)?.removePrefix("www.") }.getOrNull()
+            }
             val isAmazonLink = host != null && (
                 host == "amzn.to" || host == "amazon.eg" || host.endsWith(".amazon.eg") ||
-                host.endsWith(".amazon.com") || host.endsWith(".amazon.co.uk") ||
-                host.endsWith(".amazon.sa") || host.endsWith(".amazon.ae")
+                host == "amazon.com" || host.endsWith(".amazon.com") ||
+                host.endsWith(".amazon.co.uk") || host.endsWith(".amazon.sa") ||
+                host.endsWith(".amazon.ae")
             )
             if (candidate != null && isAmazonLink) {
                 url = candidate
-                val possibleTitle = incoming.substringBefore(candidate).trim().trim('"', '\'')
+                val possibleTitle = incoming.substringBefore(rawUrl!!).trim().trim('"', '\'')
                 if (possibleTitle.length in 3..120 && !possibleTitle.contains("http", ignoreCase = true)) {
                     name = possibleTitle
+                } else if (name.isBlank()) {
+                    name = "منتج من Amazon.eg"
                 }
-                Toast.makeText(context, "تم استيراد رابط المنتج. أدخل السعر الحالي ثم احفظ العرض.", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "تم استيراد رابط أمازون. أدخل السعر الحالي ثم احفظ العرض.", Toast.LENGTH_LONG).show()
             } else {
-                Toast.makeText(context, "لم نعثر على رابط Amazon صالح في المحتوى المُشارك.", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "لم نعثر على رابط Amazon صالح. جرّب مشاركة الرابط كنص أو نسخه ولصقه.", Toast.LENGTH_LONG).show()
             }
             onSharedTextConsumed()
         }
